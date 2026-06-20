@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Scroll Hero</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #c2c2c2;
+    overflow-x: hidden;
+  }
+
+  #scroll-hero-root {
+    position: relative;
+    width: 100%;
+    height: 100vh;
+    overflow: hidden;
+    background: #c2c2c2;
+  }
+
+  #scroll-hero-canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+
+  #scroll-hero-loader {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #c2c2c2;
+    z-index: 10;
+    font-family: -apple-system, 'Helvetica Neue', Arial, sans-serif;
+    font-size: 14px;
+    letter-spacing: 0.05em;
+    color: #777;
+    text-transform: uppercase;
+    transition: opacity 0.4s ease;
+  }
+
+  /* This spacer is just a placeholder so you can test scroll behavior
+     standalone. Delete this whole <div id="after-hero"> block once you
+     embed this page's content into your real site after the hero. */
+  #after-hero {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #111;
+    color: #fff;
+    font-family: -apple-system, 'Helvetica Neue', Arial, sans-serif;
+    font-size: 20px;
+  }
+</style>
+</head>
+<body>
+
+<div id="scroll-hero-root">
+  <canvas id="scroll-hero-canvas"></canvas>
+  <div id="scroll-hero-loader">Loading <span id="scroll-hero-progress">0%</span></div>
+</div>
+
+<!-- Demo content after the hero — remove this when embedding into your real page -->
+<div id="after-hero">Rest of page content goes here</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js"></script>
+
+<script>
+(function () {
+  // ============================================================
+  // CONFIG — sprite sheet layout (must match how sheets were built)
+  // ============================================================
+  const TILE_WIDTH = 1920;
+  const TILE_HEIGHT = 1080;
+  const COLS_PER_SHEET = 2;
+  // 30 full sheets of 14 frames each (420) + 1 final sheet with 3 frames = 423 total
+  const FRAMES_PER_SHEET = Array(30).fill(14).concat([3]);
+  const TOTAL_FRAMES = FRAMES_PER_SHEET.reduce((a, b) => a + b, 0);
+  const NATIVE_ASPECT = 1920 / 1080; // original video aspect ratio
+  const SCRUB_LENGTH_VH = 300; // how much scroll distance the sequence plays over
+  const SHEET_BASE_PATH = "./sprite_sheets/"; // folder containing sheet_0.jpg ... sheet_30.jpg — adjust if you rename/move
+
+  const sheetUrls = [];
+  for (let i = 0; i < FRAMES_PER_SHEET.length; i++) {
+    sheetUrls.push(SHEET_BASE_PATH + "sheet_" + i + ".jpg");
+  }
+
+  // Given a global frame index, find which sheet and tile row/col it's at.
+  function locateFrame(frameIndex) {
+    let remaining = frameIndex;
+    for (let sheetIdx = 0; sheetIdx < FRAMES_PER_SHEET.length; sheetIdx++) {
+      const count = FRAMES_PER_SHEET[sheetIdx];
+      if (remaining < count) {
+        const col = remaining % COLS_PER_SHEET;
+        const row = Math.floor(remaining / COLS_PER_SHEET);
+        return { sheetIdx, col, row };
+      }
+      remaining -= count;
+    }
+    const lastSheet = FRAMES_PER_SHEET.length - 1;
+    const lastInSheet = FRAMES_PER_SHEET[lastSheet] - 1;
+    return {
+      sheetIdx: lastSheet,
+      col: lastInSheet % COLS_PER_SHEET,
+      row: Math.floor(lastInSheet / COLS_PER_SHEET),
+    };
+  }
+
+  const root = document.getElementById("scroll-hero-root");
+  const canvas = document.getElementById("scroll-hero-canvas");
+  const ctx = canvas.getContext("2d");
+  const loader = document.getElementById("scroll-hero-loader");
+  const progressLabel = document.getElementById("scroll-hero-progress");
+
+  const sheetImages = new Array(sheetUrls.length);
+  let loadedCount = 0;
+  const currentFrame = { value: 0 };
+
+  function resizeCanvas() {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = root.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    render();
+  }
+
+  function render() {
+    const frameIndex = Math.round(currentFrame.value);
+    const { sheetIdx, col, row } = locateFrame(frameIndex);
+    const sheetImg = sheetImages[sheetIdx];
+    if (!sheetImg || !sheetImg.complete) return;
+
+    const rect = root.getBoundingClientRect();
+    const canvasW = rect.width;
+    const canvasH = rect.height;
+
+    // "Contain" fit (letterbox, no cropping) — change to the commented
+    // "cover" block below if you'd rather fill edge-to-edge and crop instead.
+    const canvasRatio = canvasW / canvasH;
+    let drawW, drawH, offsetX, offsetY;
+
+    if (canvasRatio > NATIVE_ASPECT) {
+      // viewport wider than content -> fit to height, letterbox sides
+      drawH = canvasH;
+      drawW = canvasH * NATIVE_ASPECT;
+      offsetX = (canvasW - drawW) / 2;
+      offsetY = 0;
+    } else {
+      // viewport taller/narrower than content -> fit to width, letterbox top/bottom
+      drawW = canvasW;
+      drawH = canvasW / NATIVE_ASPECT;
+      offsetX = 0;
+      offsetY = (canvasH - drawH) / 2;
+    }
+
+    /* COVER-FIT ALTERNATIVE (fills edge-to-edge, crops overflow):
+    if (canvasRatio > NATIVE_ASPECT) {
+      drawW = canvasW;
+      drawH = canvasW / NATIVE_ASPECT;
+      offsetX = 0;
+      offsetY = (canvasH - drawH) / 2;
+    } else {
+      drawH = canvasH;
+      drawW = canvasH * NATIVE_ASPECT;
+      offsetX = (canvasW - drawW) / 2;
+      offsetY = 0;
+    }
+    */
+
+    const srcX = col * TILE_WIDTH;
+    const srcY = row * TILE_HEIGHT;
+
+    ctx.clearRect(0, 0, canvasW, canvasH);
+    ctx.fillStyle = "#c2c2c2";
+    ctx.fillRect(0, 0, canvasW, canvasH);
+    ctx.drawImage(
+      sheetImg,
+      srcX, srcY, TILE_WIDTH, TILE_HEIGHT,
+      offsetX, offsetY, drawW, drawH
+    );
+  }
+
+  function loadSheets() {
+    sheetUrls.forEach((url, i) => {
+      const img = new Image();
+      img.onload = () => {
+        loadedCount++;
+        const pct = Math.round((loadedCount / sheetUrls.length) * 100);
+        if (progressLabel) progressLabel.textContent = pct + "%";
+        if (i === 0) resizeCanvas();
+        if (loadedCount === sheetUrls.length) onAllSheetsLoaded();
+      };
+      img.onerror = () => {
+        loadedCount++;
+        if (loadedCount === sheetUrls.length) onAllSheetsLoaded();
+      };
+      img.src = url;
+      sheetImages[i] = img;
+    });
+  }
+
+  function onAllSheetsLoaded() {
+    if (loader) {
+      loader.style.opacity = "0";
+      setTimeout(() => { loader.style.display = "none"; }, 400);
+    }
+    setupScrollTrigger();
+  }
+
+  function setupScrollTrigger() {
+    gsap.registerPlugin(ScrollTrigger);
+
+    gsap.to(currentFrame, {
+      value: TOTAL_FRAMES - 1,
+      ease: "none",
+      snap: "value",
+      onUpdate: render,
+      scrollTrigger: {
+        trigger: root,
+        start: "top top",
+        end: "+=" + SCRUB_LENGTH_VH + "%",
+        scrub: true,
+        pin: true,
+        anticipatePin: 1,
+        invalidateOnRefresh: true,
+      },
+    });
+
+    ScrollTrigger.addEventListener("refresh", resizeCanvas);
+    ScrollTrigger.refresh();
+  }
+
+  window.addEventListener("resize", () => {
+    resizeCanvas();
+    if (window.ScrollTrigger) ScrollTrigger.refresh();
+  });
+
+  loadSheets();
+})();
+</script>
+
+</body>
+</html>
